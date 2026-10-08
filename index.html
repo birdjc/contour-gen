@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Pick a spot on the map and export clean topographic contour lines as SVG or GeoJSON." />
+  <title>Contour Gen</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e0f11'/%3E%3Cg fill='none' stroke='%23FF6700' stroke-width='2'%3E%3Cpath d='M6 21c3-9 8-13 11-13s9 5 9 11'/%3E%3Cpath d='M11 21c2-5 4-7 6-7s5 3 5 7'/%3E%3C/g%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar" aria-label="Controls">
+      <header class="brand">
+        <div class="wm">Contour Gen</div>
+        <div class="wmsub">Topographic SVG export</div>
+      </header>
+
+      <section>
+        <h2 class="slbl"><span>01</span>Location</h2>
+        <form id="search-form" class="search" role="search">
+          <input id="search" type="search" placeholder="Search a place or paste lat, lon" autocomplete="off" aria-label="Search a place or enter coordinates" />
+          <button type="submit" aria-label="Search">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </form>
+        <div id="cpill" class="cpill">No point selected</div>
+        <p class="hint">Click the map, or search above.</p>
+      </section>
+
+      <section>
+        <h2 class="slbl"><span>02</span>Area</h2>
+        <div class="row-pair">
+          <label class="field num">Width / height
+            <input id="area-size" type="number" value="4" min="0.25" max="100" step="any" inputmode="decimal" />
+          </label>
+          <label class="field sel">Unit
+            <select id="area-unit"><option value="mi">miles</option><option value="km">km</option></select>
+          </label>
+        </div>
+        <p id="area-est" class="est"></p>
+      </section>
+
+      <section>
+        <h2 class="slbl"><span>03</span>Contours</h2>
+        <div class="row-pair">
+          <label class="field num">Interval
+            <input id="interval" type="number" value="50" min="0.5" max="5000" step="any" inputmode="decimal" />
+          </label>
+          <label class="field sel">Unit
+            <select id="interval-unit"><option value="ft">feet</option><option value="m">meters</option></select>
+          </label>
+        </div>
+        <div class="field">Smoothing
+          <div class="seg" id="smoothing" role="radiogroup" aria-label="Smoothing">
+            <label><input type="radio" name="smoothing" value="off" /><span>Off</span></label>
+            <label><input type="radio" name="smoothing" value="light" checked /><span>Light</span></label>
+            <label><input type="radio" name="smoothing" value="medium" /><span>Med</span></label>
+            <label><input type="radio" name="smoothing" value="heavy" /><span>Heavy</span></label>
+          </div>
+        </div>
+        <label class="check"><input id="skip-sea" type="checkbox" /><span>Skip contours below sea level</span></label>
+      </section>
+
+      <section>
+        <h2 class="slbl"><span>04</span>SVG style</h2>
+        <div class="row-pair">
+          <label class="field num">Stroke (pt)
+            <input id="stroke" type="number" value="1" min="0.1" max="10" step="any" inputmode="decimal" />
+          </label>
+          <label class="field sel">Size (in)
+            <input id="svg-size" type="number" value="10" min="1" max="60" step="1" inputmode="decimal" />
+          </label>
+        </div>
+        <label class="check"><input id="index-bold" type="checkbox" /><span>Bold every 5th line (index)</span></label>
+        <label class="check"><input id="frame" type="checkbox" /><span>Draw a frame</span></label>
+      </section>
+
+      <details class="adv">
+        <summary>Advanced</summary>
+        <label class="field">Elevation tile zoom
+          <select id="zoom">
+            <option value="auto">Auto</option>
+            <option value="15">z15 (finest)</option>
+            <option value="14">z14</option>
+            <option value="13">z13</option>
+            <option value="12">z12</option>
+            <option value="11">z11</option>
+            <option value="10">z10 (coarsest)</option>
+          </select>
+        </label>
+        <p class="hint">Higher zoom gives finer lines but downloads more tiles.</p>
+      </details>
+
+      <button id="gen-btn" type="button" disabled>Generate contours</button>
+      <div id="progress" class="progress" hidden>
+        <div class="bar"><i id="progress-bar"></i></div>
+        <span id="progress-msg">Working…</span>
+      </div>
+
+      <section id="results" hidden>
+        <h2 class="slbl"><span>✓</span>Result <em id="stale" class="stale" hidden>out of date</em></h2>
+        <div class="sgrid">
+          <div class="scell"><div class="v" id="st-levels"></div><div class="l">Contour lines</div></div>
+          <div class="scell"><div class="v" id="st-interval"></div><div class="l">Interval</div></div>
+          <div class="scell"><div class="v" id="st-zoom"></div><div class="l">Tile zoom</div></div>
+          <div class="scell"><div class="v" id="st-res"></div><div class="l">Resolution</div></div>
+          <div class="scell wide"><div class="v" id="st-range"></div><div class="l">Elevation range</div></div>
+        </div>
+        <button type="button" id="preview-btn" class="preview" aria-label="Open SVG preview">
+          <img id="preview-img" alt="Preview of the contour SVG" />
+        </button>
+        <a id="dl-svg" class="dlbtn" download>Download SVG <small></small></a>
+        <a id="dl-geojson" class="dlbtn ghost" download>Download GeoJSON <small></small></a>
+        <button type="button" id="copy-link" class="linkbtn">Copy share link</button>
+      </section>
+
+      <footer class="foot" id="foot"></footer>
+    </aside>
+
+    <main id="mapwrap">
+      <div id="map" aria-label="Map. Click to choose the centre point."></div>
+      <div class="map-msg" id="map-msg">Click map to select centre point</div>
+    </main>
+  </div>
+
+  <dialog id="preview-dialog" aria-label="SVG preview">
+    <form method="dialog"><button class="close" aria-label="Close preview">×</button></form>
+    <img id="preview-big" alt="Contour SVG preview" />
+  </dialog>
+
+  <div id="splash" hidden>
+    <div class="splash-box" role="dialog" aria-modal="true" aria-labelledby="splash-title">
+      <div class="splash-title" id="splash-title">Welcome to<br />Contour Gen</div>
+      <p class="splash-body"><strong>This app is not intended for GIS analysis!</strong> Outputs should be used strictly for illustrative or graphical purposes.</p>
+      <p class="splash-body">Larger areas take longer to process. Smaller areas produce higher-resolution contour lines, and larger areas produce lower-resolution lines.</p>
+      <div class="splash-credit">Created by Jonah Bird for DbD</div>
+      <label class="check"><input id="splash-hide" type="checkbox" /><span>Don't show this again</span></label>
+      <button id="splash-btn" type="button">I understand</button>
+    </div>
+  </div>
+
+  <div id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
