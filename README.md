@@ -1,8 +1,9 @@
 # Contour Gen
 
 Click a point on the map, pick an area and a contour interval, and export clean topographic contour
-lines as an **SVG** (black 1 pt lines, transparent background) or **GeoJSON**. For illustration
-and graphics, not GIS analysis.
+lines as **SVG**, **PNG** (150/300/600 dpi) or **GeoJSON**. SVG and PNG share one style (line and
+index colours, stroke in points, print size in inches, optional frame) and always have a
+transparent background. For illustration and graphics, not GIS analysis.
 
 A browser-only rewrite of the original R/Shiny app. Everything runs client-side, so it can be
 hosted as a static site on GitHub Pages.
@@ -19,12 +20,17 @@ hosted as a static site on GitHub Pages.
 | GPKG | `sf::st_write` | Replaced by GeoJSON (one MultiLineString per level, `elevation_ft` / `elevation_m`) |
 
 The heavy work (tile download, smoothing, tracing) runs in a Web Worker (`src/worker.js`). The
-last elevation grid is cached, so changing the interval, smoothing or SVG style re-renders in
-well under a second. Isolated bad pixels in the source tiles are removed before tracing.
+last elevation grid is cached, so changing the interval or smoothing re-traces in well under a
+second, and style changes (colour, stroke, size, frame) never touch the worker at all: the SVG is
+rebuilt on the main thread and the PNG is drawn on a canvas only when downloaded, from the same
+geometry and style (`styleGroups` / `drawContours` in `src/lib/export.js`). PNGs carry their dpi
+in a `pHYs` chunk, so layout apps open them at the right physical size. Isolated bad pixels in the
+source tiles are removed before tracing.
 
-New since the R version: place search and coordinate entry, smoothing, optional bold index
-contours and frame, stroke weight and SVG size, SVG preview, share links (state in the URL
-hash), manual tile zoom, a tile budget (max 300 tiles), and a phone layout. SVG paths are named
+New since the R version: place search and coordinate entry, smoothing, colour presets and custom
+colours, optional emphasized index contours (2x stroke, own colour) and frame, stroke weight and
+output size, PNG export, a preview on a transparency checkerboard, share links (state, including
+style, in the URL hash), manual tile zoom, a tile budget (max 300 tiles), and a phone layout. SVG paths are named
 by elevation (for example `c_1200ft`) and grouped into `index` / `intermediate` layers, so they
 show up as named layers in Illustrator or Inkscape.
 

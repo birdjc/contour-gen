@@ -7,12 +7,16 @@ import L from 'leaflet';
 import {
   squareArea, resolveZoom, groundResolution, sizeToMeters, normalizeLon, LAT_MIN, LAT_MAX
 } from './lib/geo.js';
-import { fileStem } from './lib/export.js';
+import { fileStem, buildSvg, drawContours, setPngDpi } from './lib/export.js';
 
 const ACCENT = '#FF6700';
 const MAX_TILES = 300;
 const SMOOTHING = { off: 0, light: 1, medium: 2, heavy: 3.5 }; // Gaussian sigma in tile pixels
 const SPLASH_KEY = 'contourgen.splash.hidden';
+const MAX_PNG_PX = 16384; // largest canvas side most browsers allow
+const COLOR_PRESETS = [
+  ['#000000', 'Black'], ['#ffffff', 'White'], ['#9a6a3a', 'Topo brown'], ['#ff6700', 'Orange'], ['#1f4e8c', 'Blue']
+];
 
 const $ = id => document.getElementById(id);
 const els = {
@@ -20,6 +24,8 @@ const els = {
   size: $('area-size'), sizeUnit: $('area-unit'), est: $('area-est'),
   interval: $('interval'), intervalUnit: $('interval-unit'), skipSea: $('skip-sea'),
   stroke: $('stroke'), svgSize: $('svg-size'), indexBold: $('index-bold'), frame: $('frame'), zoom: $('zoom'),
+  lineColor: $('line-color'), indexColor: $('index-color'), indexColorField: $('index-color-field'),
+  pngDpi: $('png-dpi'), dlPng: $('dl-png'), pngDims: $('png-dims'),
   gen: $('gen-btn'), progress: $('progress'), progressBar: $('progress-bar'), progressMsg: $('progress-msg'),
   results: $('results'), stale: $('stale'), previewBtn: $('preview-btn'), previewImg: $('preview-img'),
   dialog: $('preview-dialog'), previewBig: $('preview-big'),
@@ -34,7 +40,10 @@ const state = {
   result: null,     // last worker result
   busy: false,
   rerun: false,
-  urls: []          // object URLs to revoke on the next result
+  overlay: null,    // result lines as Leaflet lat/lng arrays, per level
+  geoUrl: null,     // object URLs, revoked when replaced
+  svgUrl: null,
+  indexColorTouched: false // until the user picks an index colour, it follows the line colour
 };
 
 /* ---------------- map ---------------- */
@@ -99,20 +108,26 @@ function params() {
     z: state.zoom.z, autoZoom: state.zoom.auto,
     interval: num(els.interval, NaN), intervalUnit: els.intervalUnit.value,
     smoothing: smoothing(), sigma: SMOOTHING[smoothing()],
-    skipBelowSea: els.skipSea.checked,
-    strokePt: num(els.stroke, 1), svgSizeIn: num(els.svgSize, 10),
-    indexBold: els.indexBold.checked, frame: els.frame.checked
+    skipBelowSea: els.skipSea.checked
   };
 }
 
-// Inputs that need a new download vs. ones the cached grid can answer.
+// Output style, shared by SVG and PNG. Changing it never needs the worker.
+const style = () => ({
+  sizeIn: num(els.svgSize, 10), strokePt: num(els.stroke, 1), lineColor: els.lineColor.value,
+  indexBold: els.indexBold.checked, indexColor: els.indexColor.value, frame: els.frame.checked
+});
+
+// Inputs that need a new download, ones the cached grid can answer, and pure styling.
 const areaInputs = [els.size, els.sizeUnit, els.zoom];
-const contourInputs = [els.interval, els.intervalUnit, els.skipSea, els.stroke, els.svgSize, els.indexBold, els.frame,
-  ...document.querySelectorAll('input[name=smoothing]')];
+const contourInputs = [els.interval, els.intervalUnit, els.skipSea, ...document.querySelectorAll('input[name=smoothing]')];
+const styleInputs = [els.stroke, els.svgSize, els.indexBold, els.frame, els.lineColor, els.indexColor, els.pngDpi];
 
 for (const el of areaInputs) el.addEventListener('input', () => { updateArea(); markStale(); });
 for (const el of contourInputs) el.addEventListener('input', () => scheduleRecompute());
-for (const el of [els.size, els.interval, els.stroke, els.svgSize]) {
+for (const el of styleInputs) el.addEventListener('input', () => scheduleRestyle());
+els.indexColor.addEventListener('input', () => { state.indexColorTouched = true; });
+for (const el of [els.size, els.interval]) {
   el.addEventListener('keydown', e => { if (e.key === 'Enter' && !els.gen.disabled) generate(); });
 }
 els.gen.addEventListener('click', () => generate());
@@ -240,18 +255,14 @@ function showResult(r) {
   state.result = r;
   const { stats: s, params: p } = r;
 
-  // Map overlay: one multi-polyline for regular lines, one for index lines.
-  contourLayer.clearLayers();
-  const regular = [], index = [];
-  for (const lv of r.levels) {
-    for (const l of lv.lines) {
+  state.overlay = r.levels.map(lv => ({
+    index: lv.index,
+    lines: lv.lines.map(l => {
       const ll = new Array(l.length / 4);
       for (let j = 0; j < ll.length; j++) ll[j] = [l[4 * j + 3], l[4 * j + 2]];
-      (lv.index && p.indexBold ? index : regular).push(ll);
-    }
-  }
-  if (regular.length) L.polyline(regular, { color: ACCENT, weight: 0.9, opacity: 0.65, interactive: false }).addTo(contourLayer);
-  if (index.length) L.polyline(index, { color: ACCENT, weight: 1.8, opacity: 0.85, interactive: false }).addTo(contourLayer);
+      return ll;
+    })
+  }));
   if (firstForArea) fitArea();
 
   // Stats
@@ -265,24 +276,155 @@ function showResult(r) {
   if (s.zoomFellBack) toast(`z${p.z} tiles were unavailable here; used z${s.z} instead.`);
   if (!s.levels) toast('No contour lines at this interval. The area may be flat; try a smaller interval.');
 
-  // Files
-  for (const url of state.urls) URL.revokeObjectURL(url);
-  const svgBlob = new Blob([r.svg], { type: 'image/svg+xml' });
+  // GeoJSON doesn't depend on style; SVG, preview and the map overlay are built by restyle().
+  if (state.geoUrl) URL.revokeObjectURL(state.geoUrl);
   const geoBlob = new Blob([r.geojson], { type: 'application/geo+json' });
-  const svgUrl = URL.createObjectURL(svgBlob), geoUrl = URL.createObjectURL(geoBlob);
-  state.urls = [svgUrl, geoUrl];
-  const stem = fileStem(p);
-  Object.assign(els.dlSvg, { href: svgUrl, download: `${stem}.svg` });
-  Object.assign(els.dlGeo, { href: geoUrl, download: `${stem}.geojson` });
-  els.dlSvg.querySelector('small').textContent = fmtBytes(svgBlob.size);
+  state.geoUrl = URL.createObjectURL(geoBlob);
+  Object.assign(els.dlGeo, { href: state.geoUrl, download: `${fileStem(p)}.geojson` });
   els.dlGeo.querySelector('small').textContent = fmtBytes(geoBlob.size);
-  els.previewImg.src = svgUrl;
-  els.previewBig.src = svgUrl;
 
   els.results.hidden = false;
   markStale();
+  restyle();
+}
+
+/* ---------------- style: SVG, preview, overlay, PNG ---------------- */
+
+// Coalesces bursts (dragging the colour picker, typing a stroke) into one rebuild.
+let restyleTimer;
+function scheduleRestyle() {
+  clearTimeout(restyleTimer);
+  restyleTimer = setTimeout(restyle, 40);
+}
+
+function restyle() {
+  const s = style();
+  syncStyleControls(s);
   updateFooter();
+  const r = state.result;
+  if (!r) return;
+  const p = r.params, st = r.stats;
+
+  const where = `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
+  const svg = buildSvg(r.levels, r.area, s, {
+    unit: p.intervalUnit,
+    title: `Contours ${where}`,
+    desc: `Centre ${where}; ${p.size} ${p.sizeUnit} square; ${p.interval} ${p.intervalUnit} interval; ` +
+      `WGS 84 / UTM zone ${st.zone}${st.hemisphere} (EPSG:${st.epsg}), north up; ` +
+      `elevation: AWS Terrain Tiles (Terrarium) z${st.z}, ~${st.resolution.toFixed(1)} m/px.`
+  });
+  if (state.svgUrl) URL.revokeObjectURL(state.svgUrl);
+  const svgBlob = new Blob([svg], { type: 'image/svg+xml' });
+  state.svgUrl = URL.createObjectURL(svgBlob);
+  Object.assign(els.dlSvg, { href: state.svgUrl, download: `${fileStem(p)}.svg` });
+  els.dlSvg.querySelector('small').textContent = fmtBytes(svgBlob.size);
+  els.previewImg.src = state.svgUrl;
+  els.previewBig.src = state.svgUrl;
+  // Light lines get a dark checkerboard so they stay visible.
+  const onDark = luminance(s.lineColor) > 0.6;
+  els.previewBtn.classList.toggle('on-dark', onDark);
+  els.dialog.classList.toggle('on-dark', onDark);
+
+  // The map overlay stays in the accent colour (black would vanish on the dark basemap); only
+  // the index emphasis follows the style.
+  contourLayer.clearLayers();
+  const regular = [], index = [];
+  for (const lv of state.overlay) (lv.index && s.indexBold ? index : regular).push(...lv.lines);
+  if (regular.length) L.polyline(regular, { color: ACCENT, weight: 0.9, opacity: 0.65, interactive: false }).addTo(contourLayer);
+  if (index.length) L.polyline(index, { color: ACCENT, weight: 1.8, opacity: 0.85, interactive: false }).addTo(contourLayer);
+
   writeHash(p);
+}
+
+// Swatch highlights, hex labels, the index colour row and the PNG resolution options.
+function syncStyleControls(s) {
+  if (!state.indexColorTouched) els.indexColor.value = s.lineColor;
+  for (const input of [els.lineColor, els.indexColor]) {
+    $(`${input.id}-hex`).textContent = input.value;
+    for (const b of input.closest('.colors').querySelectorAll('button.sw')) {
+      b.setAttribute('aria-pressed', String(b.dataset.c === input.value));
+    }
+  }
+  els.indexColorField.hidden = !s.indexBold;
+  for (const o of els.pngDpi.options) o.disabled = Math.round(s.sizeIn * +o.value) > MAX_PNG_PX;
+  if (els.pngDpi.selectedOptions[0]?.disabled) {
+    els.pngDpi.value = [...els.pngDpi.options].reverse().find(o => !o.disabled)?.value ?? '150';
+  }
+  const px = Math.round(s.sizeIn * +els.pngDpi.value);
+  els.pngDims.textContent = `${px.toLocaleString()} px`;
+  els.dlPng.disabled = px > MAX_PNG_PX;
+}
+
+// Preset swatches in front of each custom colour picker.
+function buildColorSwatches() {
+  for (const box of document.querySelectorAll('.colors')) {
+    const input = $(box.dataset.for);
+    const what = box.dataset.for === 'index-color' ? 'index lines' : 'lines';
+    for (const [c, name] of COLOR_PRESETS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'sw';
+      b.dataset.c = c;
+      b.style.setProperty('--c', c);
+      b.title = name;
+      b.setAttribute('aria-label', `${name} ${what}`);
+      b.addEventListener('click', () => {
+        input.value = c;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      box.insertBefore(b, box.querySelector('.sw.custom'));
+    }
+  }
+}
+
+els.dlPng.addEventListener('click', async () => {
+  const r = state.result;
+  if (!r) return;
+  const s = style(), dpi = +els.pngDpi.value;
+  const px = Math.round(s.sizeIn * dpi);
+  if (px > MAX_PNG_PX) return toast(`A ${px.toLocaleString()} px PNG is too large. Lower the dpi or the size.`, 'error');
+  els.dlPng.disabled = true;
+  const label = els.pngDims.textContent;
+  els.pngDims.textContent = 'rendering…';
+  try {
+    await new Promise(res => setTimeout(res, 30)); // let the label paint before the heavy draw
+    const canvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(px, px)
+      : Object.assign(document.createElement('canvas'), { width: px, height: px });
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no 2D context');
+    drawContours(ctx, r.levels, r.area, s, px);
+    const blob = canvas.convertToBlob
+      ? await canvas.convertToBlob({ type: 'image/png' })
+      : await new Promise(res => canvas.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('no blob');
+    const png = new Blob([setPngDpi(new Uint8Array(await blob.arrayBuffer()), dpi)], { type: 'image/png' });
+    saveBlob(png, `${fileStem(r.params)}_${dpi}dpi.png`);
+    toast(`PNG saved: ${px.toLocaleString()} × ${px.toLocaleString()} px at ${dpi} dpi, ${fmtBytes(png.size)}.`);
+  } catch {
+    toast('This browser could not render a PNG that large. Try a lower dpi or a smaller size.', 'error');
+  } finally {
+    els.pngDims.textContent = label;
+    els.dlPng.disabled = false;
+  }
+});
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+// Relative luminance of a #rrggbb colour, 0..1.
+function luminance(hex) {
+  const [r, g, b] = [1, 3, 5].map(i => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
 const sameAreaParams = (a, b) => a.lat === b.lat && a.lon === b.lon && a.sizeM === b.sizeM;
@@ -307,10 +449,14 @@ function writeHash(p) {
   });
   if (els.zoom.value !== 'auto') q.set('z', els.zoom.value);
   if (p.skipBelowSea) q.set('sea', '1');
-  if (p.indexBold) q.set('idx', '1');
-  if (p.frame) q.set('frame', '1');
-  if (p.strokePt !== 1) q.set('pt', p.strokePt);
-  if (p.svgSizeIn !== 10) q.set('in', p.svgSizeIn);
+  const s = style();
+  if (s.lineColor !== '#000000') q.set('lc', s.lineColor.slice(1));
+  if (s.indexBold) q.set('idx', '1');
+  if (s.indexBold && s.indexColor !== s.lineColor) q.set('ic', s.indexColor.slice(1));
+  if (s.frame) q.set('frame', '1');
+  if (s.strokePt !== 1) q.set('pt', s.strokePt);
+  if (s.sizeIn !== 10) q.set('in', s.sizeIn);
+  if (els.pngDpi.value !== '300') q.set('dpi', els.pngDpi.value);
   history.replaceState(null, '', `#${q}`);
 }
 
@@ -328,6 +474,12 @@ function readHash() {
   els.skipSea.checked = q.get('sea') === '1';
   els.indexBold.checked = q.get('idx') === '1';
   els.frame.checked = q.get('frame') === '1';
+  const hex = key => (/^[0-9a-f]{6}$/i.test(q.get(key) ?? '') ? `#${q.get(key).toLowerCase()}` : null);
+  els.lineColor.value = hex('lc') ?? '#000000';
+  state.indexColorTouched = Boolean(hex('ic'));
+  els.indexColor.value = hex('ic') ?? els.lineColor.value;
+  if ([...els.pngDpi.options].some(o => o.value === q.get('dpi'))) els.pngDpi.value = q.get('dpi');
+  restyle();
   return setPoint(lat, lon, { fit: true });
 }
 
@@ -336,7 +488,7 @@ function readHash() {
 function updateFooter() {
   const a = state.area;
   const crs = a ? `UTM zone ${a.zone}${a.hemisphere} (EPSG:${a.epsg})` : 'UTM zone: select a point';
-  els.foot.innerHTML = `Elevation: AWS Terrain Tiles<br>${crs}<br>SVG: ${fmtNum(num(els.stroke, 1))} pt stroke, transparent background`;
+  els.foot.innerHTML = `Elevation: AWS Terrain Tiles<br>${crs}<br>SVG / PNG: transparent background`;
 }
 
 function toast(msg, kind = 'info') {
@@ -370,7 +522,8 @@ function initSplash() {
 /* ---------------- start ---------------- */
 
 initSplash();
-updateFooter();
+buildColorSwatches();
+restyle();
 if (readHash()) generate();
 // A pasted share link only changes the hash, which doesn't reload the page.
 window.addEventListener('hashchange', () => {

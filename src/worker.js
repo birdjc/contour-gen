@@ -1,9 +1,9 @@
-// Runs the whole pipeline off the main thread: tile download -> grid -> smoothing -> contours ->
-// SVG / GeoJSON. Keeps the last elevation grid so changing interval or style is near-instant.
+// Runs the geometry pipeline off the main thread: tile download -> grid -> smoothing -> contours
+// -> GeoJSON. Keeps the last elevation grid so changing the interval or smoothing is near-instant.
 import { squareArea, pixelWindow, groundResolution, FT_PER_M } from './lib/geo.js';
 import { terrariumUrl, decodeTerrarium, mosaic, despike, gaussianBlur, gridRange } from './lib/dem.js';
 import { traceContours } from './lib/pipeline.js';
-import { buildSvg, buildGeoJson } from './lib/export.js';
+import { buildGeoJson } from './lib/export.js';
 
 const PAD = 16;            // extra pixels around the area so smoothing has real data at the edges
 const CONCURRENCY = 8;
@@ -40,24 +40,19 @@ async function run(p, progress) {
   progress(0.86, 'Tracing contours…');
   const { levels, vertices, paths } = traceContours(smoothed.grid, d.win, area, p);
 
-  progress(0.95, 'Writing SVG…');
+  progress(0.95, 'Writing GeoJSON…');
   const factor = p.intervalUnit === 'ft' ? FT_PER_M : 1;
   const range = gridRange(d.grid, d.win.w, d.win.inner);
   const res = groundResolution(p.lat, d.z);
-  const where = `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
-  const crs = `WGS 84 / UTM zone ${area.zone}${area.hemisphere} (EPSG:${area.epsg})`;
-  const svg = buildSvg(levels, area, {
-    sizeIn: p.svgSizeIn, strokePt: p.strokePt, indexBold: p.indexBold, frame: p.frame, unit: p.intervalUnit,
-    title: `Contours ${where}`,
-    desc: `Centre ${where}; ${p.size} ${p.sizeUnit} square; ${p.interval} ${p.intervalUnit} interval; ` +
-      `${crs}, north up; elevation: AWS Terrain Tiles (Terrarium) z${d.z}, ~${res.toFixed(1)} m/px.`
-  });
   const geojson = buildGeoJson(levels, p.intervalUnit);
 
+  // SVG and PNG are styled on the main thread from `levels` and these extents, so style changes
+  // never need the worker.
+  const { xmin, xmax, ymin, ymax, sizeM } = area;
   return {
     params: p,
     levels,
-    svg,
+    area: { xmin, xmax, ymin, ymax, sizeM },
     geojson,
     stats: {
       levels: levels.length,

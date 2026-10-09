@@ -63,17 +63,30 @@
       </section>
 
       <section>
-        <h2 class="slbl"><span>04</span>SVG style</h2>
+        <h2 class="slbl"><span>04</span>Style</h2>
+        <div class="field">Line color
+          <div class="colors" data-for="line-color">
+            <label class="sw custom" title="Custom color"><input id="line-color" type="color" value="#000000" aria-label="Custom line color" /></label>
+            <code class="hex" id="line-color-hex">#000000</code>
+          </div>
+        </div>
         <div class="row-pair">
           <label class="field num">Stroke (pt)
             <input id="stroke" type="number" value="1" min="0.1" max="10" step="any" inputmode="decimal" />
           </label>
           <label class="field sel">Size (in)
-            <input id="svg-size" type="number" value="10" min="1" max="60" step="1" inputmode="decimal" />
+            <input id="svg-size" type="number" value="10" min="1" max="60" step="any" inputmode="decimal" />
           </label>
         </div>
-        <label class="check"><input id="index-bold" type="checkbox" /><span>Bold every 5th line (index)</span></label>
+        <label class="check"><input id="index-bold" type="checkbox" /><span>Emphasize every 5th line (index)</span></label>
+        <div class="field sub" id="index-color-field" hidden>Index color · 2× stroke
+          <div class="colors" data-for="index-color">
+            <label class="sw custom" title="Custom color"><input id="index-color" type="color" value="#000000" aria-label="Custom index line color" /></label>
+            <code class="hex" id="index-color-hex">#000000</code>
+          </div>
+        </div>
         <label class="check"><input id="frame" type="checkbox" /><span>Draw a frame</span></label>
+        <p class="hint">Applies to SVG and PNG. Backgrounds are always transparent.</p>
       </section>
 
       <details class="adv">
@@ -107,10 +120,18 @@
           <div class="scell"><div class="v" id="st-res"></div><div class="l">Resolution</div></div>
           <div class="scell wide"><div class="v" id="st-range"></div><div class="l">Elevation range</div></div>
         </div>
-        <button type="button" id="preview-btn" class="preview" aria-label="Open SVG preview">
-          <img id="preview-img" alt="Preview of the contour SVG" />
+        <button type="button" id="preview-btn" class="preview checker" aria-label="Open preview">
+          <img id="preview-img" alt="Preview of the contour drawing" />
         </button>
         <a id="dl-svg" class="dlbtn" download>Download SVG <small></small></a>
+        <div class="png-row">
+          <select id="png-dpi" aria-label="PNG resolution">
+            <option value="150">150 dpi</option>
+            <option value="300" selected>300 dpi</option>
+            <option value="600">600 dpi</option>
+          </select>
+          <button type="button" id="dl-png" class="dlbtn">PNG <small id="png-dims"></small></button>
+        </div>
         <a id="dl-geojson" class="dlbtn ghost" download>Download GeoJSON <small></small></a>
         <button type="button" id="copy-link" class="linkbtn">Copy share link</button>
       </section>
@@ -124,9 +145,9 @@
     </main>
   </div>
 
-  <dialog id="preview-dialog" aria-label="SVG preview">
+  <dialog id="preview-dialog" class="checker" aria-label="Preview">
     <form method="dialog"><button class="close" aria-label="Close preview">×</button></form>
-    <img id="preview-big" alt="Contour SVG preview" />
+    <img id="preview-big" alt="Contour drawing preview" />
   </dialog>
 
   <div id="splash" hidden>

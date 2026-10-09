@@ -12,11 +12,25 @@ export const fileStem = p =>
 // -50 -> c_m50ft.
 export const levelId = (level, unit) => `c_${level < 0 ? 'm' : ''}${Math.abs(level)}${unit}`;
 
-// Black lines on a transparent background, sized in inches, coordinates in points. Lines are
+// Style shared by the SVG and PNG exports.
+// { sizeIn, strokePt, lineColor, indexBold, indexColor, frame }
+// With indexBold, every 5th level is drawn at twice the stroke in indexColor.
+export const INDEX_WEIGHT = 2;
+
+// The groups both exports draw, in paint order: [{ id, levels, width (pt), color }].
+export function styleGroups(levels, s) {
+  if (!s.indexBold) return [{ id: 'contours', levels, width: s.strokePt, color: s.lineColor }];
+  return [
+    { id: 'intermediate', levels: levels.filter(l => !l.index), width: s.strokePt, color: s.lineColor },
+    { id: 'index', levels: levels.filter(l => l.index), width: r2(s.strokePt * INDEX_WEIGHT), color: s.indexColor }
+  ].filter(g => g.levels.length);
+}
+
+// Lines on a transparent background, sized in inches, coordinates in points. Lines are
 // projected in UTM, so the square is true to scale and north is up (grid north).
-// o: { sizeIn, strokePt, indexBold, frame, unit, title, desc }
-export function buildSvg(levels, area, o) {
-  const pt = o.sizeIn * 72;
+// area: { xmin, ymax, sizeM }. s: style (above). meta: { unit, title, desc }.
+export function buildSvg(levels, area, s, meta) {
+  const pt = s.sizeIn * 72;
   const scale = pt / area.sizeM;
   const path = lines => {
     let d = '';
@@ -27,28 +41,96 @@ export function buildSvg(levels, area, o) {
     }
     return d;
   };
-  const pathEl = lv => `    <path id="${levelId(lv.level, o.unit)}" d="${path(lv.lines)}"/>`;
-  const group = (id, list, width) => list.length
-    ? `  <g id="${id}" stroke-width="${width}">\n${list.map(pathEl).join('\n')}\n  </g>`
-    : '';
-
-  const body = o.indexBold
-    ? [group('intermediate', levels.filter(l => !l.index), o.strokePt),
-       group('index', levels.filter(l => l.index), r2(o.strokePt * 2))].filter(Boolean).join('\n')
-    : group('contours', levels, o.strokePt);
-  const frame = o.frame
-    ? `\n  <rect id="frame" x="0" y="0" width="${pt}" height="${pt}" stroke-width="${o.strokePt}"/>`
+  const pathEl = lv => `    <path id="${levelId(lv.level, meta.unit)}" d="${path(lv.lines)}"/>`;
+  const body = styleGroups(levels, s)
+    .map(g => `  <g id="${g.id}" stroke="${esc(g.color)}" stroke-width="${g.width}">\n${g.levels.map(pathEl).join('\n')}\n  </g>`)
+    .join('\n');
+  // The frame is inset by half a stroke so its full width stays inside the page.
+  const h = s.strokePt / 2;
+  const frame = s.frame
+    ? `\n  <rect id="frame" x="${r2(h)}" y="${r2(h)}" width="${r2(pt - 2 * h)}" height="${r2(pt - 2 * h)}" stroke="${esc(s.lineColor)}" stroke-width="${s.strokePt}"/>`
     : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${o.sizeIn}in" height="${o.sizeIn}in" viewBox="0 0 ${pt} ${pt}">
-  <title>${esc(o.title)}</title>
-  <desc>${esc(o.desc)}</desc>
-<g fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">
+<svg xmlns="http://www.w3.org/2000/svg" width="${s.sizeIn}in" height="${s.sizeIn}in" viewBox="0 0 ${pt} ${pt}">
+  <title>${esc(meta.title)}</title>
+  <desc>${esc(meta.desc)}</desc>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
 ${body}${frame}
 </g>
 </svg>
 `;
+}
+
+// Draw the same picture onto a 2D canvas context of `px` x `px` pixels (left transparent).
+export function drawContours(ctx, levels, area, s, px) {
+  const scale = px / area.sizeM;
+  const pxPerPt = px / (s.sizeIn * 72);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const g of styleGroups(levels, s)) {
+    ctx.strokeStyle = g.color;
+    ctx.lineWidth = g.width * pxPerPt;
+    ctx.beginPath();
+    for (const lv of g.levels) {
+      for (const l of lv.lines) {
+        ctx.moveTo((l[0] - area.xmin) * scale, (area.ymax - l[1]) * scale);
+        for (let j = 4; j < l.length; j += 4) ctx.lineTo((l[j] - area.xmin) * scale, (area.ymax - l[j + 1]) * scale);
+      }
+    }
+    ctx.stroke();
+  }
+  if (s.frame) {
+    const w = s.strokePt * pxPerPt; // inset by half a stroke, as in the SVG
+    ctx.strokeStyle = s.lineColor;
+    ctx.lineWidth = w;
+    ctx.strokeRect(w / 2, w / 2, px - w, px - w);
+  }
+}
+
+// Write the resolution into a PNG (pHYs chunk) so print and layout apps open it at the right
+// physical size. Replaces an existing pHYs chunk, otherwise inserts one after IHDR.
+export function setPngDpi(png, dpi) {
+  const ppm = Math.round(dpi / 0.0254);
+  const chunk = new Uint8Array(21);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, 9);
+  chunk.set([0x70, 0x48, 0x59, 0x73], 4); // "pHYs"
+  view.setUint32(8, ppm);
+  view.setUint32(12, ppm);
+  chunk[16] = 1; // unit: metre
+  view.setUint32(17, crc32(chunk.subarray(4, 17)));
+
+  const src = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  for (let o = 8; o + 8 <= png.length;) {
+    const len = src.getUint32(o);
+    const type = String.fromCharCode(png[o + 4], png[o + 5], png[o + 6], png[o + 7]);
+    if (type === 'pHYs' || type === 'IDAT' || type === 'IEND') {
+      const skip = type === 'pHYs' ? len + 12 : 0;
+      const out = new Uint8Array(png.length - skip + 21);
+      out.set(png.subarray(0, o));
+      out.set(chunk, o);
+      out.set(png.subarray(o + skip), o + 21);
+      return out;
+    }
+    o += len + 12;
+  }
+  return png;
+}
+
+let crcTable;
+export function crc32(bytes) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c >>> 0;
+    }
+  }
+  let c = 0xffffffff;
+  for (const b of bytes) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
 // One MultiLineString feature per level, WGS 84 lon/lat.

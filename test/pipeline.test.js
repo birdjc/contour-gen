@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { squareArea, pixelWindow, M_PER_MI } from '../src/lib/geo.js';
 import { decodeTerrarium, mosaic, despike, gaussianBlur } from '../src/lib/dem.js';
 import { traceContours } from '../src/lib/pipeline.js';
-import { buildSvg, buildGeoJson, levelId, fileStem } from '../src/lib/export.js';
+import { buildSvg, buildGeoJson, levelId, fileStem, drawContours, setPngDpi, crc32 } from '../src/lib/export.js';
 
 describe('Terrarium decoding', () => {
   it('decodes RGB to metres', () => {
@@ -94,16 +94,41 @@ describe('traceContours (synthetic hill in Boulder)', () => {
 
   it('exports SVG and GeoJSON', () => {
     const { levels } = traceContours(grid, { ...win, z: 14 }, area, { interval: 10, intervalUnit: 'm' });
-    const svg = buildSvg(levels, area, { sizeIn: 10, strokePt: 1, indexBold: true, frame: true, unit: 'm', title: 't', desc: 'd & <e>' });
+    const style = { sizeIn: 10, strokePt: 1, lineColor: '#9a6a3a', indexBold: true, indexColor: '#1f4e8c', frame: true };
+    const svg = buildSvg(levels, area, style, { unit: 'm', title: 't', desc: 'd & <e>' });
     expect(svg).toContain('width="10in"');
     expect(svg).toContain('viewBox="0 0 720 720"');
-    expect(svg).toContain('<g id="index" stroke-width="2">');
+    expect(svg).toContain('<g id="intermediate" stroke="#9a6a3a" stroke-width="1">');
+    expect(svg).toContain('<g id="index" stroke="#1f4e8c" stroke-width="2">');
+    expect(svg).toContain('<rect id="frame" x="0.5" y="0.5" width="719" height="719" stroke="#9a6a3a"');
+    const plain = buildSvg(levels, area, { ...style, indexBold: false }, { unit: 'm', title: 't', desc: 'd' });
+    expect(plain).toContain('<g id="contours" stroke="#9a6a3a" stroke-width="1">');
+    expect(plain).not.toContain('#1f4e8c');
     expect(svg).toContain('id="c_1590m"');
     expect(svg).toContain('d &amp; &lt;e&gt;');
     expect(svg).toContain('<rect id="frame"');
     const coords = [...svg.matchAll(/[ML ](-?[\d.]+),(-?[\d.]+)/g)].map(m => [+m[1], +m[2]]);
     expect(coords.length).toBeGreaterThan(100);
     expect(coords.every(([x, y]) => x >= -0.01 && x <= 720.01 && y >= -0.01 && y <= 720.01)).toBe(true);
+
+    // The PNG renderer draws the same groups in the same place, scaled to pixels.
+    const calls = [];
+    const ctx = new Proxy({}, {
+      get: (t, k) => (k in t ? t[k] : (...a) => calls.push([k, ...a])),
+      set: (t, k, v) => { calls.push([`=${k}`, v]); return true; }
+    });
+    drawContours(ctx, levels, area, style, 3000); // 10 in at 300 dpi
+    const sets = calls.filter(c => c[0].startsWith('='));
+    expect(sets).toContainEqual(['=strokeStyle', '#9a6a3a']);
+    expect(sets).toContainEqual(['=strokeStyle', '#1f4e8c']);
+    expect(sets).toContainEqual(['=lineWidth', 3000 / 720]);     // 1 pt
+    expect(sets).toContainEqual(['=lineWidth', 2 * 3000 / 720]); // index: 2 pt
+    expect(calls.filter(c => c[0] === 'stroke')).toHaveLength(2);
+    const w = 3000 / 720;
+    expect(calls.find(c => c[0] === 'strokeRect')).toEqual(['strokeRect', w / 2, w / 2, 3000 - w, 3000 - w]);
+    const pts = calls.filter(c => c[0] === 'moveTo' || c[0] === 'lineTo');
+    expect(pts.length).toBe(coords.length);
+    expect(pts.every(([, x, y]) => x >= -0.01 && x <= 3000.01 && y >= -0.01 && y <= 3000.01)).toBe(true);
 
     const gj = JSON.parse(buildGeoJson(levels, 'm'));
     expect(gj.features).toHaveLength(levels.length);
@@ -113,6 +138,54 @@ describe('traceContours (synthetic hill in Boulder)', () => {
     const [lo, la] = f.geometry.coordinates[0][0];
     expect(Math.abs(lo - lon)).toBeLessThan(0.05);
     expect(Math.abs(la - lat)).toBeLessThan(0.05);
+  });
+});
+
+describe('setPngDpi', () => {
+  // Minimal PNG skeleton: signature, IHDR, IDAT, IEND (contents don't matter for chunk handling).
+  const chunk = (type, data) => {
+    const out = new Uint8Array(12 + data.length);
+    const v = new DataView(out.buffer);
+    v.setUint32(0, data.length);
+    out.set([...type].map(c => c.charCodeAt(0)), 4);
+    out.set(data, 8);
+    v.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+    return out;
+  };
+  const concat = (...parts) => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
+  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const chunks = png => {
+    const v = new DataView(png.buffer), out = [];
+    for (let o = 8; o < png.length;) {
+      const len = v.getUint32(o);
+      out.push({ type: String.fromCharCode(...png.subarray(o + 4, o + 8)), data: png.subarray(o + 8, o + 8 + len),
+        crcOk: v.getUint32(o + 8 + len) === crc32(png.subarray(o + 4, o + 8 + len)) });
+      o += len + 12;
+    }
+    return out;
+  };
+
+  it('has a correct CRC-32', () => {
+    expect(crc32(new TextEncoder().encode('IEND'))).toBe(0xae426082);
+  });
+
+  it('inserts pHYs before IDAT, or replaces an existing one', () => {
+    const base = concat(sig, chunk('IHDR', new Uint8Array(13)), chunk('IDAT', new Uint8Array([1, 2, 3])), chunk('IEND', new Uint8Array()));
+    const out = setPngDpi(base, 300);
+    const c = chunks(out);
+    expect(c.map(x => x.type)).toEqual(['IHDR', 'pHYs', 'IDAT', 'IEND']);
+    expect(c.every(x => x.crcOk)).toBe(true);
+    const v = new DataView(c[1].data.buffer, c[1].data.byteOffset);
+    expect(v.getUint32(0)).toBe(11811); // 300 dpi in pixels per metre
+    expect(c[1].data[8]).toBe(1);
+    const again = chunks(setPngDpi(out, 150));
+    expect(again.map(x => x.type)).toEqual(['IHDR', 'pHYs', 'IDAT', 'IEND']);
+    expect(new DataView(again[1].data.buffer, again[1].data.byteOffset).getUint32(0)).toBe(5906);
   });
 });
 
