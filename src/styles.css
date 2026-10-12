@@ -193,7 +193,7 @@ details.adv summary:hover { color: var(--muted); }
 .osm-dark { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.3); }
 .map-msg {
   position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(21, 22, 26, .9);
-  border: 1px solid var(--line); border-radius: 20px; padding: 5px 14px; font-size: 10px; letter-spacing: 2px;
+  border: 1px solid var(--line); border-radius: 24px; padding: 9px 20px; font-size: 12px; letter-spacing: 2px;
   color: var(--muted); pointer-events: none; z-index: 900; white-space: nowrap; text-transform: uppercase;
 }
 
@@ -241,7 +241,7 @@ details.adv summary:hover { color: var(--muted); }
   #app { flex-direction: column-reverse; height: auto; min-height: 100dvh; overflow: visible; }
   #mapwrap { flex: none; height: 55vh; height: 55dvh; }
   #sidebar { width: 100%; min-width: 0; border-right: 0; border-top: 1px solid var(--line); overflow: visible; padding: 16px 16px 24px; }
-  .map-msg { bottom: 16px; }
+  .map-msg { bottom: 16px; font-size: 11px; padding: 8px 16px; letter-spacing: 1.5px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

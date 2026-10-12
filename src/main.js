@@ -309,7 +309,7 @@ function restyle() {
   const svg = buildSvg(r.levels, r.area, s, {
     unit: p.intervalUnit,
     title: `Contours ${where}`,
-    desc: `Centre ${where}; ${p.size} ${p.sizeUnit} square; ${p.interval} ${p.intervalUnit} interval; ` +
+    desc: `Center ${where}; ${p.size} ${p.sizeUnit} square; ${p.interval} ${p.intervalUnit} interval; ` +
       `WGS 84 / UTM zone ${st.zone}${st.hemisphere} (EPSG:${st.epsg}), north up; ` +
       `elevation: AWS Terrain Tiles (Terrarium) z${st.z}, ~${st.resolution.toFixed(1)} m/px.`
   });
